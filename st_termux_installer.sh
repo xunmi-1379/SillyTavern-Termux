@@ -253,48 +253,80 @@ ensure_node_version() {
 
 # ----------------------------- 代码拉取 -------------------------------------
 # ============================================================================
-# 下载源列表（按优先级排列，国内网络优先）
-# 每个源提供：git clone 地址、压缩包地址、是否走加速
-# 用户也可以用 --source N 手动指定
+# 下载线路（用户可手动选择，也可 --source N 指定）
+#   1 = 国际线路: GitHub 官方直连（速度最快，但需要开启魔法/代理）
+#   2 = 国内线路: gh-proxy.com 加速（无需魔法，但很慢且容易失败）
+#   3 = 国内线路: gitclone.com 镜像（上面那个不行时的备选）
+#   6 = 自定义地址（--source-url 指定）
 # ============================================================================
 SOURCE_NAMES=(
-    "gh-proxy.com 压缩包（国内推荐）"
-    "gitclone.com 镜像（国内备用）"
-    "GitHub 官方 git（有代理时用）"
-    "ghproxy.net 压缩包（备用）"
-    "ghfast.top 压缩包（备用）"
-    "自定义地址（--source-url 指定）"
+    "国际线路 GitHub 官方（需要魔法）"
+    "国内线路 gh-proxy.com"
+    "国内线路 gitclone.com 镜像"
+    ""
+    ""
+    "自定义地址"
 )
 
 # 返回第 N 个源的 git 地址
 source_url() {
     local n="$1" branch="$2"
     local base="https://github.com/SillyTavern/SillyTavern.git"
-    local tarball="https://github.com/SillyTavern/SillyTavern/archive/refs/heads/${branch:-release}.tar.gz"
     case "$n" in
-        1) echo "https://gh-proxy.com/${base}" ;;
-        2) echo "https://gitclone.com/github.com/SillyTavern/SillyTavern.git" ;;
-        3) echo "$base" ;;
-        4) echo "https://ghproxy.net/${base}" ;;
-        5) echo "https://ghfast.top/${base}" ;;
+        1) echo "$base" ;;
+        2) echo "https://gh-proxy.com/${base}" ;;
+        3) echo "https://gitclone.com/github.com/SillyTavern/SillyTavern.git" ;;
         6) echo "${CUSTOM_SOURCE_URL:-}" ;;
         *) echo "" ;;
     esac
 }
 
-# 返回第 N 个源的**压缩包**地址（用于 git 失败时的兜底）
+# 返回第 N 个源的**压缩包**地址
 source_tarball() {
     local n="$1" branch="${2:-release}"
     local tarball="https://github.com/SillyTavern/SillyTavern/archive/refs/heads/${branch}.tar.gz"
     case "$n" in
-        1) echo "https://gh-proxy.com/${tarball}" ;;
-        2) echo "https://gitclone.com/github.com/SillyTavern/SillyTavern/archive/${branch}.tar.gz" ;;
-        3) echo "$tarball" ;;
-        4) echo "https://ghproxy.net/${tarball}" ;;
-        5) echo "https://ghfast.top/${tarball}" ;;
+        1) echo "$tarball" ;;
+        2) echo "https://gh-proxy.com/${tarball}" ;;
+        3) echo "https://gitclone.com/github.com/SillyTavern/SillyTavern/archive/${branch}.tar.gz" ;;
         6) echo "${CUSTOM_SOURCE_URL:-}" ;;
         *) echo "" ;;
     esac
+}
+
+# 选择下载线路（新手向导）
+choose_source() {
+    local has_proxy=0
+    [ -n "${https_proxy:-}" ] || [ -n "${HTTPS_PROXY:-}" ] || [ -n "${http_proxy:-}" ] || [ -n "${HTTP_PROXY:-}" ] && has_proxy=1
+
+    echo ""
+    echo -e "${CYAN}────────────────────────────────────────────────────${NC}"
+    echo -e "${BOLD}  选择下载线路${NC}"
+    echo -e "${CYAN}────────────────────────────────────────────────────${NC}"
+    echo -e "  ${GREEN}1${NC}. 国际线路 — GitHub 官方  ${YELLOW}★ 推荐该选项，需要开启魔法${NC}"
+    echo -e "     如果下载失败，可能是魔法不稳定导致。"
+    echo -e "     速度最快，一般 1~3 分钟即可下载完。"
+    echo ""
+    echo -e "  ${GREEN}2${NC}. 国内线路 — gh-proxy 加速"
+    echo -e "     下载极其缓慢，极大概率失败。"
+    echo -e "     不需要魔法，但仓库约 160MB，可能要等很久甚至中途断开。"
+    echo ""
+    echo -e "  ${GREEN}3${NC}. 国内线路 — gitclone 镜像"
+    echo -e "     和选项 2 类似，是另一个国内镜像。选项 2 不行时可以试它。"
+    echo -e "${CYAN}────────────────────────────────────────────────────${NC}"
+    [ "$has_proxy" -eq 1 ] && echo -e "  ${BLUE}检测到你已设置代理环境变量，选 1 应该没问题。${NC}"
+    echo -e "  直接按回车 = 选 1 (国际线路)"
+
+    local c
+    while true; do
+        read -r -p "  请输入 [1-3]: " c
+        case "${c:-1}" in
+            1) echo 1; return ;;
+            2) echo 2; return ;;
+            3) echo 3; return ;;
+            *) warn "只能输入 1~3，请重新输入。" ;;
+        esac
+    done
 }
 
 # 快速探测一个地址是否可达（HEAD 请求，最多 12 秒）
@@ -400,73 +432,71 @@ install_from_tarball() {
     return 0
 }
 
-# 尝试用第 N 个源获取代码
-# 顺序: 先压缩包(直连 HTTP，国内加速器对下载友好) -> 再 git clone(失败再试)
+# 用某条线路获取代码
+#   国际线路(1): 优先 git clone（有魔法时最快，且带 .git 方便以后更新）
+#   国内线路(2/3): 优先压缩包（git 传输大仓库容易 invalid index-pack）
 try_source() {
     local n="$1" dest="$2" branch="$3" label="$4"
     local gurl turl
     gurl="$(source_url "$n" "$branch")"
     turl="$(source_tarball "$n" "$branch")"
 
-    # 方式A: 压缩包（首选 — 不受 git 协议大包传输问题影响）
-    if [ -n "$turl" ]; then
-        if install_from_tarball "$dest" "$branch" "$n"; then
-            return 0
-        fi
-        warn "[$label] 压缩包方式失败，尝试 git clone..."
-    fi
-
-    # 方式B: git clone（官方源且网络通畅时最快）
-    if [ -n "$gurl" ]; then
-        info "[$label] 正在 git clone..."
-        rm -rf "$dest"
-        if timeout "${CLONE_TIMEOUT:-240}" git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
-               clone -b "$branch" --depth 1 "$gurl" "$dest" 2>&1 | tee -a "$LOG_FILE" | tail -n 12; then
-            if [ -d "$dest/.git" ] && [ -f "$dest/server.js" ]; then
-                ok "[$label] git clone 成功。"
-                return 0
-            fi
-        fi
+    if [ "$n" -eq 1 ]; then
+        if try_git_clone "$gurl" "$dest" "$branch" "$label"; then ok "[$label] 下载完成。"; return 0; fi
+        warn "[$label] git 方式失败，改用压缩包再试一次..."
+        if try_tarball "$turl" "$dest" "$branch" "$n" "$label"; then return 0; fi
+    else
+        if try_tarball "$turl" "$dest" "$branch" "$n" "$label"; then return 0; fi
+        warn "[$label] 压缩包方式失败，改用 git 再试一次..."
+        if try_git_clone "$gurl" "$dest" "$branch" "$label"; then ok "[$label] 下载完成。"; return 0; fi
     fi
 
     rm -rf "$dest"
     return 1
 }
 
-# 依次尝试所有源；国内源优先
+# git clone 方式
+try_git_clone() {
+    local gurl="$1" dest="$2" branch="$3" label="$4"
+    [ -n "$gurl" ] || return 1
+    info "[$label] 正在 git clone..."
+    rm -rf "$dest"
+    timeout "${CLONE_TIMEOUT:-300}" git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
+        clone -b "$branch" --depth 1 "$gurl" "$dest" 2>&1 | tee -a "$LOG_FILE" | tail -n 12
+    [ -d "$dest/.git" ] && [ -f "$dest/server.js" ]
+}
+
+# 压缩包方式
+try_tarball() {
+    local turl="$1" dest="$2" branch="$3" n="$4" label="$5"
+    [ -n "$turl" ] || return 1
+    install_from_tarball "$dest" "$branch" "$n"
+}
+
+# 用用户选定的线路下载代码。
+# 重要: 只尝试选中的那一条线路，失败就停下并提示，不会偷偷换成别的线路。
 clone_repo() {
     local dest="$1" branch="${2:-release}"
-    local -a order=()
+    local n="${FORCE_SOURCE:-1}"
+    local label="${SOURCE_NAMES[$((n - 1))]:-源$n}"
 
-    if [ -n "${FORCE_SOURCE:-}" ]; then
-        order=("$FORCE_SOURCE")
-    else
-        order=(1 2 3 4 5)
+    local gurl turl
+    gurl="$(source_url "$n" "$branch")"
+    turl="$(source_tarball "$n" "$branch")"
+
+    if [ -z "$gurl" ] && [ -z "$turl" ]; then
+        error "线路 $n 没有可用的下载地址。"
+        return 1
     fi
 
-    local n
-    for n in "${order[@]}"; do
-        local label="${SOURCE_NAMES[$((n - 1))]:-源$n}"
-        local gurl
-        gurl="$(source_url "$n" "$branch")"
-        local turl
-        turl="$(source_tarball "$n" "$branch")"
+    # 国内线路先探测一下，避免用户干等
+    if [ "$n" -ne 1 ] && [ -n "$turl" ] && ! probe_url "$turl"; then
+        warn "[$label] 该线路当前不可达。"
+    fi
 
-        if [ -z "$gurl" ] && [ -z "$turl" ]; then
-            continue
-        fi
-
-        # 先探测，避免在死链上干等
-        if [ -n "$turl" ] && ! probe_url "$turl"; then
-            warn "[$label] 该源当前不可达，跳过（换下一个源）"
-            continue
-        fi
-
-        if try_source "$n" "$dest" "$branch" "$label"; then
-            return 0
-        fi
-        warn "[$label] 这个源没成功，继续换下一个..."
-    done
+    if try_source "$n" "$dest" "$branch" "$label"; then
+        return 0
+    fi
 
     rm -rf "$dest"
     return 1
@@ -830,6 +860,13 @@ do_install() {
     fi
 
     step "2/4 获取 SillyTavern 代码"
+
+    # 先选下载线路（交互模式下），再选版本
+    if [ -t 0 ] && [ -z "${FORCE_SOURCE:-}" ]; then
+        FORCE_SOURCE="$(choose_source)"
+    fi
+    FORCE_SOURCE="${FORCE_SOURCE:-1}"
+
     local target="release"
     if [ -t 0 ]; then
         target="$(choose_branch)"
@@ -841,14 +878,25 @@ do_install() {
     [ "$target" = "staging" ] && branch="staging"
 
     if ! clone_repo "$ST_DIR" "$branch"; then
-        error "所有下载源都没成功，代码没有获取到。"
+        local ln="${SOURCE_NAMES[$((FORCE_SOURCE - 1))]:-线路$FORCE_SOURCE}"
+        error "下载失败（线路: $ln）。"
         echo -e ""
-        echo -e "${YELLOW}  按顺序排查(任选其一即可):${NC}"
-        echo -e "    ${GREEN}1)${NC} 检查网络: 先关掉 VPN/代理再试一次（有些代理反而连不上国内加速源）"
-        echo -e "    ${GREEN}2)${NC} 换个源重试: 重新运行脚本，加参数 ${CYAN}--source 2${NC}"
-        echo -e "        例如: ${CYAN}bash ~/st_termux_installer.sh --source 2 --install${NC}"
-        echo -e "    ${GREEN}3)${NC} 用代理: 先执行 ${CYAN}export https_proxy=http://127.0.0.1:7890${NC}（端口改成你的代理）"
-        echo -e "    ${GREEN}4)${NC} 查看可用源: ${CYAN}bash ~/st_termux_installer.sh --sources${NC}"
+        if [ "$FORCE_SOURCE" -eq 1 ]; then
+            echo -e "${YELLOW}  你选择的是国际线路，需要开启魔法。${NC}"
+            echo -e "  如果已经开了魔法，${YELLOW}下载失败通常是魔法不稳定导致的${NC}，请检查："
+            echo -e "    ${GREEN}1)${NC} 魔法是否真的在生效（浏览器能打开 github.com 吗）"
+            echo -e "    ${GREEN}2)${NC} 换个节点再试，或不稳定时改用国内线路"
+            echo -e "    ${GREEN}3)${NC} Termux 里没有自动代理，需要手动设置:"
+            echo -e "       ${CYAN}export https_proxy=http://127.0.0.1:7890${NC}  (端口换成你魔法的本地端口)"
+            echo -e "       然后重新运行脚本"
+            echo -e ""
+            echo -e "    ${BLUE}不想开魔法${NC}: 重新运行脚本，线路选 ${GREEN}2${NC}（国内线路，但很慢且容易失败）"
+        else
+            echo -e "${YELLOW}  你选择的是国内线路（无需魔法，但下载极其缓慢，容易失败）。${NC}"
+            echo -e "    ${GREEN}1)${NC} 重新运行脚本再试一次，网络状态会变"
+            echo -e "    ${GREEN}2)${NC} 换另一条国内线路（2 或 3）"
+            echo -e "    ${GREEN}3)${NC} 有魔法的话，选 ${GREEN}1${NC} 会快很多"
+        fi
         echo -e ""
         echo -e "  ${BLUE}详细日志${NC}: $LOG_FILE"
         return 1
@@ -869,10 +917,12 @@ do_install() {
         return 1
     }
 
-    step "4/4 初始化配置与快捷命令"
+    step "4/4 初始化配置与开机自启"
     setup_config
+
+    # 自启是默认行为，不需要用户额外选择
     install_self
-    enable_autostart
+    install_alias
     ok "安装完成！"
     log "install ok"
 
@@ -884,7 +934,7 @@ do_install() {
     echo -e "  2. 启动酒馆: 菜单选 1 ，或直接敲 ${GREEN}st${NC}"
     echo -e "  3. 打开酒馆网页: 手机浏览器访问 ${CYAN}http://127.0.0.1:$(get_port)${NC}"
     echo -e "  4. 关闭酒馆: 在运行中的界面按 ${YELLOW}Ctrl+C${NC}（先按 CTRL 再按 C）"
-    echo -e "  5. 卸载 / 关闭自启: 菜单选 9 / 12"
+    echo -e "  5. 如果不想要开机菜单，菜单里选 9 卸载，或执行 ${CYAN}stm --no-autostart${NC}"
     echo -e "${GREEN}────────────────────────────────────────────────${NC}"
 
     if [ "$auto_start" = "restart" ]; then
@@ -1105,13 +1155,16 @@ has_autostart() {
     grep -q "^${AUTOSTART_BEGIN}" "$HOME/.bashrc" 2>/dev/null
 }
 
-# 安装/更新自启块：每次打开 Termux 自动进入脚本菜单
+# 安装/更新自启块：每次打开 Termux 自动进入脚本菜单（默认行为）
 enable_autostart() {
     local rc="$HOME/.bashrc"
     touch "$rc" 2>/dev/null
 
     # 先删掉旧的标记块，避免重复（重复会导致要退出两次）
     disable_autostart_quiet
+    # 清掉此前第三方脚本（如 violet.sh / st-menu.sh）残留的自启行，
+    # 那些脚本被删掉后会在每次启动时报错。
+    clean_legacy_autostart
 
     install_self
 
@@ -1133,11 +1186,46 @@ enable_autostart() {
 
     # Termux 登录时读的是 .bash_profile，要确保它加载 .bashrc
     ensure_bash_profile
+    fix_broken_bashrc
+    return 0
+}
 
-    ok "已设置「打开 Termux 自动进入菜单」"
-    echo -e "  以后每次打开 Termux，会直接看到管理菜单。"
-    echo -e "  ${YELLOW}想临时回到普通命令行${NC}: 在菜单里选 0 退出即可；"
-    echo -e "  ${YELLOW}想彻底关闭自启${NC}: 菜单里选 12 。"
+# 清理旧脚本留下的自启（它们会在启动时刷报错）
+clean_legacy_autostart() {
+    local rc="$HOME/.bashrc"
+    [ -f "$rc" ] || return 0
+    local before after
+    before=$(md5sum "$rc" 2>/dev/null | cut -d' ' -f1)
+    # 只删“调用这些脚本”的行，以及其注释标题；不动其他内容
+    sed -i "/violet\.sh/d" "$rc" 2>/dev/null
+    sed -i "/st-menu\.sh/d" "$rc" 2>/dev/null
+    sed -i "/Violet SillyTavern 管理面板自启动/d" "$rc" 2>/dev/null
+    after=$(md5sum "$rc" 2>/dev/null | cut -d' ' -f1)
+    [ "$before" != "$after" ] && info "已清理旧脚本残留的自启配置。"
+    return 0
+}
+
+# 修复被误删而残留的孤立语句（此前的清理命令可能留下孤立的 fi/if），
+# 这类残行会让 .bashrc 报语法错误，进而导致自启失效。
+# 注意: 这里只删“孤立的语句行”，绝不能碰标记块，否则会把刚写好的自启删掉。
+fix_broken_bashrc() {
+    local rc="$HOME/.bashrc"
+    [ -f "$rc" ] || return 0
+    bash -n "$rc" 2>/dev/null && return 0     # 语法正常就不用管
+
+    local tmp="$rc.stfix.$$"
+    awk -v b="$AUTOSTART_BEGIN" -v e="$AUTOSTART_END" '
+        # 标记块原样保留，一个字都不改
+        $0 == b { inblk = 1 }
+        inblk  { print; if ($0 == e) inblk = 0; next }
+        # 块外：丢掉完全孤立的语句行（没有配对的 if）
+        /^[ \t]*(fi|else|then)[ \t]*$/ { next }
+        { print }
+    ' "$rc" > "$tmp" 2>/dev/null && mv "$tmp" "$rc"
+
+    bash -n "$rc" 2>/dev/null && \
+        ok "检测到 ~/.bashrc 有语法残留，已自动修复。" || \
+        warn "~/.bashrc 仍有语法问题，可手动执行: nano ~/.bashrc"
 }
 
 ensure_bash_profile() {
@@ -1181,11 +1269,9 @@ toggle_autostart() {
 }
 
 install_alias() {
-    # 兼容旧调用：直接走 enable_autostart（里面包含快捷命令）
-    if ! has_autostart; then
-        enable_autostart > /dev/null 2>&1 && \
-            info "已添加：打开 Termux 自动进菜单，以及快捷命令 st / stu / stm"
-    fi
+    # 默认开启自启（每次运行都会校正一次，顺手修复被改坏的 .bashrc）
+    enable_autostart > /dev/null 2>&1
+    ok "已设置：打开 Termux 自动进入菜单（快捷命令 st / stu / stm）"
 }
 
 install_self() {
@@ -1209,7 +1295,7 @@ do_uninstall() {
         fi
     fi
     rm -rf "$ST_DIR" && ok "已删除 $ST_DIR"
-    sed -i '/>>> st-toolbox alias >>>/,/<<< st-toolbox alias <<</d' "$HOME/.bashrc" 2>/dev/null
+    sed -i "/^${AUTOSTART_BEGIN}$/,/^${AUTOSTART_END}$/d" "$HOME/.bashrc" 2>/dev/null
     ok "已清理快捷命令。备份文件保留在 $BACKUP_DIR"
 }
 
@@ -1325,13 +1411,12 @@ main() {
         --autostart)  enable_autostart ;;
         --no-autostart) disable_autostart ;;
         --sources)
-            echo "可用的下载源:"
-            local i
-            for i in "${!SOURCE_NAMES[@]}"; do
-                printf "  %d. %s\n" $((i + 1)) "${SOURCE_NAMES[$i]}"
-            done
+            echo "可用的下载线路:"
+            printf "  1. 国际线路 GitHub 官方（需要魔法，速度最快）\n"
+            printf "  2. 国内线路 gh-proxy.com（无需魔法，很慢，容易失败）\n"
+            printf "  3. 国内线路 gitclone.com 镜像（同上，备选）\n"
             echo ""
-            echo "用法举例: bash st_termux_installer.sh --source 2 --install"
+            echo "用法举例: bash st_termux_installer.sh --source 2"
             ;;
         --pkg-mirror) PKG_MIRROR="$2"; shift; install_termux_deps; ;;
         --npm-mirror) NPM_MIRROR="$2"; shift ;;
