@@ -23,6 +23,7 @@ BACKUP_DIR="$HOME/st_backups"        # 备份目录
 LOG_DIR="$HOME/.st_manager"
 LOG_FILE="$LOG_DIR/install.log"
 SELF_PATH="$HOME/st_termux_installer.sh"
+CHOSEN_FILE="$LOG_DIR/.choice"        # 菜单选择结果回传用
 NODE_MIN_MAJOR=20                    # SillyTavern 要求 node >= 20
 TAG_DISPLAY_LIMIT=10
 
@@ -295,9 +296,17 @@ source_tarball() {
 }
 
 # 选择下载线路（新手向导）
+# 注意: 不能写成 X="$(choose_source)"，否则菜单文字会被一起吞进变量里，
+#       用户就只看到一句 "请输入 [1-3]"。
+#       这里通过临时文件回传结果，管道/子 shell 环境下也可靠。
+CHOSEN_SOURCE=""
 choose_source() {
+    mkdir -p "$LOG_DIR" 2>/dev/null
     local has_proxy=0
-    [ -n "${https_proxy:-}" ] || [ -n "${HTTPS_PROXY:-}" ] || [ -n "${http_proxy:-}" ] || [ -n "${HTTP_PROXY:-}" ] && has_proxy=1
+    if [ -n "${https_proxy:-}" ] || [ -n "${HTTPS_PROXY:-}" ] || \
+       [ -n "${http_proxy:-}" ] || [ -n "${HTTP_PROXY:-}" ]; then
+        has_proxy=1
+    fi
 
     echo ""
     echo -e "${CYAN}────────────────────────────────────────────────────${NC}"
@@ -321,10 +330,12 @@ choose_source() {
     while true; do
         read -r -p "  请输入 [1-3]: " c
         case "${c:-1}" in
-            1) echo 1; return ;;
-            2) echo 2; return ;;
-            3) echo 3; return ;;
-            *) warn "只能输入 1~3，请重新输入。" ;;
+            1|2|3)
+                CHOSEN_SOURCE="${c:-1}"
+                echo "${c:-1}" > "$CHOSEN_FILE" 2>/dev/null
+                return
+                ;;
+            *) echo -e "${YELLOW}  只能输入 1~3，请重新输入。${NC}" ;;
         esac
     done
 }
@@ -507,8 +518,11 @@ list_tags() {
     git -C "$ST_DIR" tag --sort=-creatordate 2>/dev/null | head -n "$TAG_DISPLAY_LIMIT"
 }
 
+# 选择版本
+# 注意: 结果写入 CHOSEN_BRANCH 全局变量，菜单直接打印到屏幕
+CHOSEN_BRANCH=""
 choose_branch() {
-    # 输出: release / staging / tag:<name>
+    mkdir -p "$LOG_DIR" 2>/dev/null
     local tags=()
     mapfile -t tags < <(list_tags)
     local n=${#tags[@]} i
@@ -545,26 +559,29 @@ choose_branch() {
         read -r -p "  请输入 [1-${max_opt}]: " c
         c="${c:-1}"
         case "$c" in
-            1) echo "release"; return ;;
-            2) echo "staging"; return ;;
+            1) CHOSEN_BRANCH="release"; echo "release" > "$CHOSEN_FILE" 2>/dev/null; return ;;
+            2) CHOSEN_BRANCH="staging"; echo "staging" > "$CHOSEN_FILE" 2>/dev/null; return ;;
             3)
                 if [ "$n" -eq 0 ]; then
-                    warn "没有可用的 Tag，改用 release 稳定版。"
-                    echo "release"
+                    echo -e "${YELLOW}  没有可用的 Tag，改用 release 稳定版。${NC}"
+                    CHOSEN_BRANCH="release"
+                    echo "release" > "$CHOSEN_FILE" 2>/dev/null
                     return
                 fi
+                local t
                 read -r -p "  输入序号(1-${n})或完整 Tag 号: " t
                 if [[ "$t" =~ ^[0-9]+$ ]] && [ "$t" -ge 1 ] && [ "$t" -le "$n" ]; then
-                    echo "tag:${tags[$((t - 1))]}"
+                    CHOSEN_BRANCH="tag:${tags[$((t - 1))]}"
                 elif [ -n "$t" ]; then
-                    echo "tag:$t"
+                    CHOSEN_BRANCH="tag:$t"
                 else
-                    echo "release"
+                    CHOSEN_BRANCH="release"
                 fi
+                echo "$CHOSEN_BRANCH" > "$CHOSEN_FILE" 2>/dev/null
                 return
                 ;;
             *)
-                warn "只能输入 1~${max_opt}，请重新输入。"
+                echo -e "${YELLOW}  只能输入 1~${max_opt}，请重新输入。${NC}"
                 ;;
         esac
     done
@@ -862,14 +879,26 @@ do_install() {
     step "2/4 获取 SillyTavern 代码"
 
     # 先选下载线路（交互模式下），再选版本
+    # 注意: 直接调用，让菜单输出到屏幕；结果通过回传文件读取
     if [ -t 0 ] && [ -z "${FORCE_SOURCE:-}" ]; then
-        FORCE_SOURCE="$(choose_source)"
+        mkdir -p "$LOG_DIR" 2>/dev/null
+        rm -f "$CHOSEN_FILE"
+        choose_source
+        local picked=""
+        [ -f "$CHOSEN_FILE" ] && picked="$(cat "$CHOSEN_FILE" 2>/dev/null)"
+        FORCE_SOURCE="${picked:-${CHOSEN_SOURCE:-1}}"
     fi
     FORCE_SOURCE="${FORCE_SOURCE:-1}"
+    info "已选择线路: ${SOURCE_NAMES[$((FORCE_SOURCE - 1))]:-线路$FORCE_SOURCE}"
 
     local target="release"
     if [ -t 0 ]; then
-        target="$(choose_branch)"
+        mkdir -p "$LOG_DIR" 2>/dev/null
+        rm -f "$CHOSEN_FILE"
+        choose_branch
+        local picked=""
+        [ -f "$CHOSEN_FILE" ] && picked="$(cat "$CHOSEN_FILE" 2>/dev/null)"
+        target="${picked:-${CHOSEN_BRANCH:-release}}"
     else
         info "非交互模式，使用 release 分支。"
     fi
@@ -1275,12 +1304,30 @@ install_alias() {
 }
 
 install_self() {
-    # 支持 bash <(curl ...) 运行；把自己复制到 HOME 便于下次直接用
+    # 把正在运行的脚本保存到 HOME，方便以后直接 stm 打开
     local src="${BASH_SOURCE[0]}"
     [ "$src" = "$SELF_PATH" ] && return 0
-    if [ -f "$src" ] && [ -r "$src" ] && case "$src" in /proc/*|/dev/fd/*) false;; *) true;; esac; then
-        cp "$src" "$SELF_PATH" 2>/dev/null && chmod +x "$SELF_PATH" 2>/dev/null && \
-            info "脚本已保存到 $SELF_PATH"
+
+    # 用 bash <(curl ...) 运行时，src 是 /dev/fd/63 这类管道，
+    # 内容读一次就没了；所以这里从文件描述符重新读一份写下去。
+    if [ -f "$src" ]; then
+        case "$src" in
+            /dev/fd/*|/proc/*/fd/*)
+                { cat "$src" > "$SELF_PATH.tmp.$$"; } 2>/dev/null
+                ;;
+            *)
+                cp "$src" "$SELF_PATH.tmp.$$" 2>/dev/null
+                ;;
+        esac
+        if [ -s "$SELF_PATH.tmp.$$" ] && head -1 "$SELF_PATH.tmp.$$" | grep -q '^#!.*bash'; then
+            mv "$SELF_PATH.tmp.$$" "$SELF_PATH" 2>/dev/null
+            chmod +x "$SELF_PATH" 2>/dev/null
+            local v
+            v="$(grep -c '选择下载线路' "$SELF_PATH" 2>/dev/null || echo 0)"
+            info "脚本已更新到 $SELF_PATH ($(wc -l < "$SELF_PATH") 行)"
+        else
+            rm -f "$SELF_PATH.tmp.$$"
+        fi
     fi
 }
 
