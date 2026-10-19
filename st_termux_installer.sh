@@ -311,9 +311,9 @@ choose_source() {
     fi
 
     echo ""
-    echo -e "${CYAN}────────────────────────────────────────────────────${NC}"
+    echo -e "${CYAN}$(hr_line "$(menu_width)" "─")${NC}"
     echo -e "${BOLD}  选择下载线路${NC}"
-    echo -e "${CYAN}────────────────────────────────────────────────────${NC}"
+    echo -e "${CYAN}$(hr_line "$(menu_width)" "─")${NC}"
     echo -e "  ${GREEN}1${NC}. 国际线路 — GitHub 官方  ${YELLOW}★ 推荐该选项，需要开启魔法${NC}"
     echo -e "     如果下载失败，可能是魔法不稳定导致。"
     echo -e "     速度最快，一般 1~3 分钟即可下载完。"
@@ -324,7 +324,7 @@ choose_source() {
     echo ""
     echo -e "  ${GREEN}3${NC}. 国内线路 — gitclone 镜像"
     echo -e "     和选项 2 类似，是另一个国内镜像。选项 2 不行时可以试它。"
-    echo -e "${CYAN}────────────────────────────────────────────────────${NC}"
+    echo -e "${CYAN}$(hr_line "$(menu_width)" "─")${NC}"
     [ "$has_proxy" -eq 1 ] && echo -e "  ${BLUE}检测到你已设置代理环境变量，选 1 应该没问题。${NC}"
     echo -e "  直接按回车 = 选 1 (国际线路)"
 
@@ -530,9 +530,9 @@ choose_branch() {
     local n=${#tags[@]} i
 
     echo ""
-    echo -e "${CYAN}────────────────────────────────────────────────────${NC}"
+    echo -e "${CYAN}$(hr_line "$(menu_width)" "─")${NC}"
     echo -e "${BOLD}  选择要安装的版本${NC}"
-    echo -e "${CYAN}────────────────────────────────────────────────────${NC}"
+    echo -e "${CYAN}$(hr_line "$(menu_width)" "─")${NC}"
     echo -e "  ${GREEN}1${NC}. release 分支  ${YELLOW}★ 推荐新手选这个${NC}"
     echo -e "     说明: SillyTavern 官方的「稳定版」。功能是所有版本里最稳定的，"
     echo -e "           经过开发者测试后才发布，出问题最少。"
@@ -550,7 +550,7 @@ choose_branch() {
         echo -e "     最近的 Tag:"
         for ((i = 0; i < n; i++)); do printf "        %2d) %s\n" $((i + 1)) "${tags[$i]}"; done
     fi
-    echo -e "${CYAN}────────────────────────────────────────────────────${NC}"
+    echo -e "${CYAN}$(hr_line "$(menu_width)" "─")${NC}"
     echo -e "  直接按回车 = 选 1 (release 稳定版)"
 
     local max_opt=2
@@ -1147,7 +1147,7 @@ doctor() {
 # 只在首次启动时额外提示一句（横幅由 main_menu 统一打印）
 FIRST_SCREEN=1
 show_welcome() {
-    echo -e "${CYAN}────────────────────────────────────────────────────────${NC}"
+    echo -e "${CYAN}$(hr_line "$(menu_width)" "─")${NC}"
     if [ -f "$ST_DIR/server.js" ]; then
         echo -e "  ${GREEN}酒馆已安装${NC} — 输入 ${GREEN}1${NC} 启动，输入 ${GREEN}3${NC} 更新"
     else
@@ -1343,18 +1343,85 @@ API_SHOP_URL="https://shop.shuixian.fan/"
 API_BASE_URL="https://api.shuixian.love/v1"
 API_QUOTA_URL="https://ed.shuixian.love/"
 
-# 大标题（VIOLET 风格 ASCII）
-# 说明: 每行按“V 顶部基线”手工对齐好了，这里只整体加左边距，
-#       保证手机上既不偏左也不会换行。
-BANNER_PAD=10
+# ----------------------------- 终端宽度自适应 -------------------------------
+# 手机竖屏很窄（常见 40 列左右），标题和分隔线必须按实际列数画，
+# 否则会被折行、错位。
+term_cols() {
+    local c=""
+    c="$(tput cols 2>/dev/null | tr -dc '0-9')"
+    if [ -n "$c" ] && [ "$c" -gt 10 ] 2>/dev/null; then echo "$c"; return; fi
+
+    c="$(stty size 2>/dev/null | awk '{print $2}' | tr -dc '0-9')"
+    if [ -n "$c" ] && [ "$c" -gt 10 ] 2>/dev/null; then echo "$c"; return; fi
+
+    c="$(printf '%s' "${COLUMNS:-}" | tr -dc '0-9')"
+    if [ -n "$c" ] && [ "$c" -gt 10 ] 2>/dev/null; then echo "$c"; return; fi
+
+    echo 80   # 探测失败时的保守默认值
+}
+
+# 输出一条横线：cols 为“显示列数”
+# 只用半角 ASCII 字符（= - +），保证每个字符正好占 1 列，
+# 不用全角制表符，避免不同终端下宽度计算不一致导致折行。
+hr_line() {
+    local cols="$1" ch="${2:--}" i out="" n
+    case "$ch" in
+        ═|─|━|=|-) ch="=" ;;
+        *)         ch="-" ;;
+    esac
+    n=$cols
+    [ "$n" -lt 1 ] && n=1
+    for ((i = 0; i < n; i++)); do out="${out}${ch}"; done
+    printf '%s\n' "$out"
+}
+
+# 菜单可用宽度：取实际终端宽度，但最多 60 列（避免大屏上空旷）
+menu_width() {
+    local c=""
+    c="$(term_cols)"
+    c="$(printf '%s' "$c" | tr -dc '0-9')"
+    [ -z "$c" ] && c=80
+    if [ "$c" -gt 60 ]; then c=60; fi
+    if [ "$c" -lt 20 ]; then c=20; fi
+    echo "$c"
+}
+
+# 大标题：按终端宽度自动选择尺寸
+#   足够宽 -> ASCII VIOLET 艺术字
+#   窄屏   -> 文字标题（手机上更清晰，不会折行）
 print_banner() {
+    local cols; cols="$(menu_width)"
+
     echo -e "${CYAN}"
-    printf '%*s%s\n' "$BANNER_PAD" "" '__      __  ___   ____   _      _____  _____'
-    printf '%*s%s\n' "$BANNER_PAD" "" '\ \    / / |_ _| / __ \ | |    |  ___||_   _|'
-    printf '%*s%s\n' "$BANNER_PAD" "" ' \ \  / /   | | | |  | || |    | |__    | |'
-    printf '%*s%s\n' "$BANNER_PAD" "" '  \ \/ /    | | | |  | || |    |  __|   | |'
-    printf '%*s%s\n' "$BANNER_PAD" "" '   \  /     | | | |__| || |___ | |___   | |'
-    printf '%*s%s\n' "$BANNER_PAD" "" '    \/     |___| \____/ |_____||_____|  |_|'
+    if [ "$cols" -ge 56 ]; then
+        local art=(
+            '__      __  ___   ____   _      _____  _____'
+            '\ \    / / |_ _| / __ \ | |    |  ___||_   _|'
+            ' \ \  / /   | | | |  | || |    | |__    | |'
+            '  \ \/ /    | | | |  | || |    |  __|   | |'
+            '   \  /     | | | |__| || |___ | |___   | |'
+            '    \/     |___| \____/ |_____||_____|  |_|'
+        )
+        local l
+        for l in "${art[@]}"; do
+            local pad=$(( (cols - ${#l}) / 2 ))
+            [ "$pad" -lt 0 ] && pad=0
+            printf '%*s%s\n' "$pad" "" "$l"
+        done
+    else
+        # 窄屏：极简 3 行字形，宽度 32 列，手机上不会折行
+        local art=(
+            '__  __ ___   __  _    ____  ____'
+            '\ \/ /| _ \ / _|| |  / _ \|  _ \'
+            ' \__/ |___/ \__||_|  \___/|____/'
+        )
+        local l
+        for l in "${art[@]}"; do
+            local pad=$(( (cols - ${#l}) / 2 ))
+            [ "$pad" -lt 0 ] && pad=0
+            printf '%*s%s\n' "$pad" "" "$l"
+        done
+    fi
     echo -e "${NC}"
 }
 
@@ -1375,13 +1442,13 @@ main_menu() {
             FIRST_SCREEN=0
             show_welcome
         fi
-        echo -e "${CYAN}════════════════════════════════════${NC}"
+        echo -e "${CYAN}$(hr_line "$(menu_width)" "═")${NC}"
         echo -e " ${DIM}作者${NC} ${BLUE}${AUTHOR_NAME}${NC}    ${DIM}群${NC} ${BLUE}${QQ_GROUP_1}${NC} / ${BLUE}${QQ_GROUP_2}${NC}"
         echo -e " ${DIM}购卡${NC} ${UNDERLINE}${API_SHOP_URL#https://}${NC}"
         echo -e " ${DIM}URL ${NC} ${UNDERLINE}${API_BASE_URL#https://}${NC}"
         echo -e " ${DIM}查额${NC} ${UNDERLINE}${API_QUOTA_URL#https://}${NC}"
         echo -e " ${DIM}酒馆${NC} $env_state    ${DIM}端口${NC} ${BLUE}${port}${NC}"
-        echo -e "${CYAN}════════════════════════════════════${NC}"
+        echo -e "${CYAN}$(hr_line "$(menu_width)" "═")${NC}"
         echo -e "${BOLD}${BLUE}  核心功能${NC}"
         echo -e "   ${GREEN}1${NC} 启动酒馆        ${GREEN}2${NC} ${BOLD}一键安装${NC}"
         echo -e "   ${GREEN}3${NC} 更新酒馆        ${GREEN}4${NC} 切换版本"
@@ -1390,9 +1457,9 @@ main_menu() {
         echo -e "   ${GREEN}5${NC} 重装依赖        ${GREEN}6${NC} 环境体检"
         echo -e "   ${GREEN}7${NC} 备份恢复        ${GREEN}8${NC} 网络设置"
         echo -e "   ${GREEN}9${NC} 卸载酒馆"
-        echo -e "${CYAN}════════════════════════════════════${NC}"
+        echo -e "${CYAN}$(hr_line "$(menu_width)" "═")${NC}"
         echo -e "   ${RED}0${NC} 退出"
-        echo -e "${CYAN}════════════════════════════════════${NC}"
+        echo -e "${CYAN}$(hr_line "$(menu_width)" "═")${NC}"
         # 注意: read -p 不会解析颜色转义码，必须先用 printf 输出提示
         printf " 选择功能 [0-9] > "
         read -r opt
