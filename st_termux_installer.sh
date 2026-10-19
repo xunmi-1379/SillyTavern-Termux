@@ -946,30 +946,19 @@ do_install() {
         return 1
     }
 
-    step "4/4 初始化配置与开机自启"
+    step "4/4 初始化配置"
     setup_config
 
-    # 自启是默认行为，不需要用户额外选择
+    # 自启默认开启，不向用户做额外说明
     install_self
-    install_alias
+    install_alias > /dev/null 2>&1
     ok "安装完成！"
     log "install ok"
-
-    echo ""
-    echo -e "${GREEN}────────────────────────────────────────────────${NC}"
-    echo -e "${BOLD} 使用说明（建议看完）${NC}"
-    echo -e "${GREEN}────────────────────────────────────────────────${NC}"
-    echo -e "  1. 以后${YELLOW}打开 Termux 会直接进入本菜单${NC}，不用再敲长命令"
-    echo -e "  2. 启动酒馆: 菜单选 1 ，或直接敲 ${GREEN}st${NC}"
-    echo -e "  3. 打开酒馆网页: 手机浏览器访问 ${CYAN}http://127.0.0.1:$(get_port)${NC}"
-    echo -e "  4. 关闭酒馆: 在运行中的界面按 ${YELLOW}Ctrl+C${NC}（先按 CTRL 再按 C）"
-    echo -e "  5. 如果不想要开机菜单，菜单里选 9 卸载，或执行 ${CYAN}stm --no-autostart${NC}"
-    echo -e "${GREEN}────────────────────────────────────────────────${NC}"
 
     if [ "$auto_start" = "restart" ]; then
         start_st
     elif [ "$auto_start" != "no" ]; then
-        if [ "$auto_start" = "yes" ] || confirm "现在启动 SillyTavern 吗？" y; then
+        if [ "$auto_start" = "yes" ] || confirm "现在打开酒馆吗？" y; then
             start_st
         fi
     fi
@@ -1153,26 +1142,16 @@ doctor() {
 }
 
 # ----------------------------- 开头提醒 -------------------------------------
+# 只在首次启动时额外提示一句（横幅由 main_menu 统一打印）
+FIRST_SCREEN=1
 show_welcome() {
-    local installed=0
-    [ -f "$ST_DIR/server.js" ] && installed=1
-
-    echo -e "${CYAN}====================================================${NC}"
-    echo -e "${BOLD}${PURPLE}  SillyTavern Termux 一键安装/管理工具${NC}  ${YELLOW}v${SCRIPT_VERSION}${NC}"
-    echo -e "${CYAN}====================================================${NC}"
-    if [ "$installed" -eq 0 ]; then
-        echo -e "  ${YELLOW}当前状态: 还没安装 SillyTavern${NC}"
-        echo -e "  ${GREEN}下一步: 在下面菜单输入 2 ，会自动开始安装${NC}"
-        echo -e ""
-        echo -e "  ${BLUE}小提示${NC}"
-        echo -e "  · 安装时下载依赖要 15~40 分钟，${YELLOW}别锁屏、别切后台${NC}"
-        echo -e "  · 所有提问直接按回车 = 用推荐项，也能装上"
-        echo -e "  · 装好后任何时候敲 ${GREEN}stm${NC} 都能回到这个菜单"
+    echo -e "${CYAN}────────────────────────────────────────────────────────${NC}"
+    if [ -f "$ST_DIR/server.js" ]; then
+        echo -e "  ${GREEN}酒馆已安装${NC} — 输入 ${GREEN}1${NC} 启动，输入 ${GREEN}3${NC} 更新"
     else
-        echo -e "  ${GREEN}当前状态: SillyTavern 已安装${NC}"
-        echo -e "  想启动就输入 ${GREEN}1${NC}，想更新输入 ${GREEN}3${NC}"
+        echo -e "  ${YELLOW}还没安装酒馆${NC} — 在下面菜单输入 ${GREEN}2${NC} 开始安装"
+        echo -e "  ${BLUE}提示${NC}: 安装依赖需要 15~40 分钟，${YELLOW}请保持屏幕常亮${NC}"
     fi
-    echo -e "${CYAN}====================================================${NC}"
 }
 
 # ----------------------------- 快捷命令 / 自启 -------------------------------
@@ -1297,10 +1276,18 @@ toggle_autostart() {
     fi
 }
 
+# 静默校正自启（首次运行或 .bashrc 被破坏时自动修好，用户无感知）
+ensure_autostart_silent() {
+    if has_autostart && bash -n "$HOME/.bashrc" 2>/dev/null; then
+        return 0
+    fi
+    enable_autostart > /dev/null 2>&1
+}
+
 install_alias() {
     # 默认开启自启（每次运行都会校正一次，顺手修复被改坏的 .bashrc）
+    # 这是内部机制，不需要向用户展示
     enable_autostart > /dev/null 2>&1
-    ok "已设置：打开 Termux 自动进入菜单（快捷命令 st / stu / stm）"
 }
 
 install_self() {
@@ -1346,38 +1333,65 @@ do_uninstall() {
     ok "已清理快捷命令。备份文件保留在 $BACKUP_DIR"
 }
 
-# ----------------------------- 主菜单 ---------------------------------------
+# ----------------------------- 站点信息 -------------------------------------
+AUTHOR_NAME="水仙"
+QQ_GROUP_1="1037161927"
+QQ_GROUP_2="1063330958"
+API_SHOP_URL="https://shop.shuixian.fan/"
+API_BASE_URL="https://api.shuixian.love/v1"
+API_QUOTA_URL="https://ed.shuixian.love/"
+
+# 大标题（VIOLET 风格 ASCII）
+print_banner() {
+    echo -e "${CYAN}"
+    cat <<'BANNER'
+__     ___ ___  _____ _____ _____
+\ \   / (_)/ _ \|  _  |  ___|_   _|
+ \ \ / /| | | | | | | | |__   | |
+  \ V / | | |_| | |_| |  __|  | |
+   \_/  |_|\___/ \_____|_|     |_|
+BANNER
+    echo -e "${NC}"
+    echo -e "                ${PURPLE}${BOLD}紫罗兰 · SillyTavern 酒馆面板${NC}"
+}
+
+# 主菜单
 main_menu() {
     while true; do
         clear 2>/dev/null || true
-        local env_state node_state port
-        if command -v node > /dev/null 2>&1; then
-            node_state="$(node -v)"
-            node_major_ok || node_state="${RED}${node_state} (需>=${NODE_MIN_MAJOR})${NC}"
+        local env_state port
+        if [ -f "$ST_DIR/server.js" ]; then
+            env_state="${GREEN}● 已安装${NC}"
         else
-            node_state="${RED}未安装${NC}"
+            env_state="${YELLOW}○ 未安装${NC}"
         fi
-        if [ -f "$ST_DIR/server.js" ]; then env_state="${GREEN}已安装${NC}"; else env_state="${YELLOW}未安装${NC}"; fi
         port="$(get_port)"
 
-        echo -e "${CYAN}----------------------------------------------------${NC}"
-        echo -e " SillyTavern : $env_state    Node: $node_state"
-        echo -e " 目录        : ${CYAN}$ST_DIR${NC}  端口: ${CYAN}$port${NC}"
-        echo -e " 开机自启    : $(autostart_state)"
-        echo -e "${CYAN}----------------------------------------------------${NC}"
-        echo -e " ${GREEN}1${NC}. 启动 SillyTavern"
-        echo -e " ${GREEN}2${NC}. ${BOLD}一键安装${NC} (装依赖+装ST+初始化+启动)"
-        echo -e " ${GREEN}3${NC}. 更新 SillyTavern"
-        echo -e " ${GREEN}4${NC}. 切换版本 (release/staging/Tag 回退)"
-        echo -e " ${GREEN}5${NC}. 重装依赖 (修复 npm 报错)"
-        echo -e " ${GREEN}6${NC}. 环境体检 (doctor)"
-        echo -e " ${GREEN}7${NC}. 备份 / 恢复数据"
-        echo -e " ${GREEN}8${NC}. 修改端口 / 网络设置"
-        echo -e " ${GREEN}9${NC}. 卸载 SillyTavern"
-        echo -e " ${GREEN}12${NC}. 开机自启 (打开 Termux 自动进菜单)"
+        print_banner
+        if [ "$FIRST_SCREEN" -eq 1 ]; then
+            FIRST_SCREEN=0
+            show_welcome
+        fi
+        echo -e "${CYAN}════════════════════════════════════════════════════════${NC}"
+        echo -e " 作者:${AUTHOR_NAME}  群:${QQ_GROUP_1} / ${QQ_GROUP_2}"
+        echo -e " 购卡: ${API_SHOP_URL#https://}"
+        echo -e " API: ${API_BASE_URL#https://}"
+        echo -e " 查额: ${API_QUOTA_URL#https://}"
+        echo -e " 酒馆:$env_state  端口:${port}"
+        echo -e "${CYAN}════════════════════════════════════════════════════════${NC}"
+        echo -e "${BOLD}${BLUE} 【 核心功能 】${NC}"
+        echo -e " ${GREEN}1${NC}. 启动    ${GREEN}2${NC}. 一键安装"
+        echo -e " ${GREEN}3${NC}. 更新    ${GREEN}4${NC}. 切换版本"
+        echo ""
+        echo -e "${BOLD}${BLUE} 【 维护与修复 】${NC}"
+        echo -e " ${GREEN}5${NC}. 重装依赖   ${GREEN}6${NC}. 环境体检"
+        echo -e " ${GREEN}7${NC}. 备份恢复   ${GREEN}8${NC}. 网络设置"
+        echo -e " ${GREEN}9${NC}. 卸载酒馆"
+        echo ""
+        echo -e "${CYAN}════════════════════════════════════════════════════════${NC}"
         echo -e " ${GREEN}0${NC}. 退出"
-        echo -e "${CYAN}====================================================${NC}"
-        read -r -p " 请输入选项 [0-9/12]: " opt
+        echo -e "${CYAN}════════════════════════════════════════════════════════${NC}"
+        read -r -p " 请选择功能 [0-9]: " opt
 
         case "$opt" in
             1) start_st; break ;;
@@ -1419,25 +1433,22 @@ main_menu() {
                 pause
                 ;;
             9) do_uninstall; pause ;;
-            12) toggle_autostart; pause ;;
             0) exit 0 ;;
             *) error "无效选项"; sleep 1 ;;
         esac
     done
 }
 
-autostart_state() {
-    if has_autostart; then
-        echo -e "${GREEN}已开启${NC}"
-    else
-        echo -e "${RED}未开启${NC}"
-    fi
-}
-
 # ----------------------------- 入口 -----------------------------------------
 main() {
     detect_platform
     mkdir -p "$LOG_DIR" 2>/dev/null
+
+    # 自启是默认行为：每次启动都静默校正一次（用户无需感知）
+    if [ -z "$ST_MENU_NOLOOP" ]; then
+        install_self > /dev/null 2>&1
+        ensure_autostart_silent
+    fi
 
     # 先解析可选参数（下载源）
     while [ $# -gt 0 ]; do
@@ -1473,9 +1484,6 @@ main() {
             ;;
         "")
             install_self
-            if [ -z "$ST_MENU_NOLOOP" ]; then
-                show_welcome
-            fi
             main_menu
             ;;
         *) error "未知参数: $1"; echo "使用 --help 查看用法。"; exit 1 ;;
