@@ -619,7 +619,7 @@ checkout_branch() {
 
 # ----------------------------- 依赖安装(npm) --------------------------------
 npm_install_deps() {
-    step "安装 npm 依赖 (这一步最慢，请耐心等待，20~40 分钟也正常)"
+    step "3/4 安装依赖 (这一步最慢，15~40 分钟都正常)"
 
     [ -d "$ST_DIR" ] || die "安装目录不存在: $ST_DIR"
     cd "$ST_DIR" || die "无法进入 $ST_DIR"
@@ -630,14 +630,58 @@ npm_install_deps() {
 
     [ -f package.json ] || die "没有找到 package.json，目录可能不完整。"
 
-    # 与官方 start.sh 保持一致，但更省内存
+    echo -e "${YELLOW}  提示: 接下来会下载大量依赖包，屏幕可能长时间没有新内容。${NC}"
+    echo -e "${YELLOW}       这属于正常现象，${BOLD}不是卡住${NC}${YELLOW}，请保持屏幕常亮、不要关闭 Termux。${NC}"
+    echo ""
     info "正在执行 npm install ..."
+
+    # 日志目录必须先建好，否则 tee 写日志失败会让整条管道返回非零，
+    # 从而把成功的安装误判成失败。
+    mkdir -p "$LOG_DIR" 2>/dev/null
+    touch "$LOG_FILE" 2>/dev/null
+
     local st
+    local -a pipe
+    if command -v stdbuf > /dev/null 2>&1; then
+        pipe=(stdbuf -oL -eL npm install --no-audit --no-fund --omit=dev)
+    else
+        pipe=(npm install --no-audit --no-fund --omit=dev)
+    fi
+
+    # 退出码以 npm 为准：先写临时文件再读，避免 tee 影响
+    local stfile="$LOG_DIR/.npmpipe.$$"
     set -o pipefail
-    DEBIAN_FRONTEND=noninteractive NODE_ENV=production npm install \
-        --no-audit --no-fund --no-progress --omit=dev 2>&1 | tee -a "$LOG_FILE" | tail -n 20
-    st=$?
+    ( DEBIAN_FRONTEND=noninteractive NODE_ENV=production "${pipe[@]}" 2>&1; echo "NPMEXIT=$?" > "$stfile" ) \
+        | tee -a "$LOG_FILE" &
+    local teepid=$!
+
+    # 同时每 15 秒打印一次“仍在进行中”，让用户知道没卡死
+    (
+        waited=0
+        while kill -0 "$teepid" 2>/dev/null; do
+            sleep 15
+            waited=$((waited + 15))
+            kill -0 "$teepid" 2>/dev/null || break
+            printf "\r${DIM}  ... 仍在安装依赖，已等待 %d 分 %02d 秒（请勿关闭）${NC}" \
+                $((waited / 60)) $((waited % 60))
+        done
+        printf "\r%*s\r" 62 ""
+    ) &
+    local tickpid=$!
+
+    set +e
+    wait "$teepid"
+    kill "$tickpid" 2>/dev/null
+    wait "$tickpid" 2>/dev/null
     set +o pipefail
+
+    # 优先读 npm 的真实退出码（tee/管道可能返回异常码）
+    st=0
+    if [ -f "$stfile" ]; then
+        st="$(sed -n 's/^NPMEXIT=//p' "$stfile" | head -n1)"
+        rm -f "$stfile"
+    fi
+    [ -z "$st" ] && st=0
 
     if [ "$st" -ne 0 ]; then
         warn "npm install 失败 (退出码 $st)。"
@@ -933,13 +977,40 @@ do_install() {
         return 1
     fi
     ok "代码获取完成。"
+    log "code fetched"
+
+    # ------------------------------------------------------------------
+    # 过渡提示：代码下载好之后，到依赖真正开始安装之间还有几步
+    # （同步标签、切分支等），这段时间屏幕可能长时间没动静，
+    # 必须明确告诉用户“不是卡住，请耐心等”，否则容易被误以为失败。
+    # ------------------------------------------------------------------
+    echo ""
+    echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
+    echo -e "  ${GREEN}${BOLD}✔ 第一步完成：代码已下载${NC}"
+    echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
+    echo -e "  接下来准备安装依赖（npm），中间可能会有 ${YELLOW}1~2 分钟没有动静${NC}，"
+    echo -e "  这是正常的，${YELLOW}不是卡住，请耐心等待，不要关闭 Termux${NC}。"
+    echo -e ""
+    echo -e "  依赖安装完整过程约 ${YELLOW}15~40 分钟${NC}，请保持屏幕常亮。"
+    echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
+    echo ""
+
+    info "正在同步版本信息（可能需要几秒）..."
     git -C "$ST_DIR" fetch --tags > /dev/null 2>&1 || true
+    ok "版本信息同步完成。"
 
     if [[ "$target" == tag:* ]]; then
+        info "正在切换到 Tag ${target#tag:} ..."
         checkout_branch "$target" && ok "已切换到 Tag ${target#tag:}"
     elif [ "$target" = "staging" ]; then
+        info "正在切换到 staging 分支 ..."
         checkout_branch staging && ok "已切换到 staging 分支。"
     fi
+
+    echo ""
+    echo -e "${YELLOW}  马上开始安装依赖，请耐心等待，中途没有输出是正常的。${NC}"
+    echo ""
+    sleep 2
 
     step "3/4 安装依赖"
     npm_install_deps || {
