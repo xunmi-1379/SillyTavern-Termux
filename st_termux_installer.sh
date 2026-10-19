@@ -32,8 +32,10 @@ if [ -t 1 ]; then
     RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
     BLUE='\033[0;34m'; CYAN='\033[0;36m'; PURPLE='\033[0;35m'
     BOLD='\033[1m'; NC='\033[0m'
+    DIM='\033[2m'; UNDERLINE='\033[4m'
 else
     RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; PURPLE=''; BOLD=''; NC=''
+    DIM=''; UNDERLINE=''
 fi
 
 # ----------------------------- 输出函数 -------------------------------------
@@ -1341,18 +1343,21 @@ API_SHOP_URL="https://shop.shuixian.fan/"
 API_BASE_URL="https://api.shuixian.love/v1"
 API_QUOTA_URL="https://ed.shuixian.love/"
 
-# 大标题（VIOLET 风格 ASCII）
+# 大标题（VIOLET 风格 ASCII，整体居中）
+BANNER_WIDTH=54
 print_banner() {
     echo -e "${CYAN}"
-    cat <<'BANNER'
-__     ___ ___  _____ _____ _____
-\ \   / (_)/ _ \|  _  |  ___|_   _|
- \ \ / /| | | | | | | | |__   | |
-  \ V / | | |_| | |_| |  __|  | |
-   \_/  |_|\___/ \_____|_|     |_|
+    # 逐行按终端宽度居中，避免手机上标题偏左
+    awk -v W="$BANNER_WIDTH" '
+        { n = int((W - length($0)) / 2); if (n < 0) n = 0; printf "%*s%s\n", n, "", $0 }
+    ' <<'BANNER'
+ __     __ ___  _     ___  _____
+ \ \   / /|_ _|| |   / _ \|  ___|
+  \ \ / /  | | | |  | | | || |___
+   \ V /   | | | |__| |_| ||  ___|
+    \_/   |___||____|\___/ |_|
 BANNER
     echo -e "${NC}"
-    echo -e "                ${PURPLE}${BOLD}紫罗兰 · SillyTavern 酒馆面板${NC}"
 }
 
 # 主菜单
@@ -1372,26 +1377,25 @@ main_menu() {
             FIRST_SCREEN=0
             show_welcome
         fi
-        echo -e "${CYAN}════════════════════════════════════════════════════════${NC}"
-        echo -e " 作者:${AUTHOR_NAME}  群:${QQ_GROUP_1} / ${QQ_GROUP_2}"
-        echo -e " 购卡: ${API_SHOP_URL#https://}"
-        echo -e " API: ${API_BASE_URL#https://}"
-        echo -e " 查额: ${API_QUOTA_URL#https://}"
-        echo -e " 酒馆:$env_state  端口:${port}"
-        echo -e "${CYAN}════════════════════════════════════════════════════════${NC}"
-        echo -e "${BOLD}${BLUE} 【 核心功能 】${NC}"
-        echo -e " ${GREEN}1${NC}. 启动    ${GREEN}2${NC}. 一键安装"
-        echo -e " ${GREEN}3${NC}. 更新    ${GREEN}4${NC}. 切换版本"
-        echo ""
-        echo -e "${BOLD}${BLUE} 【 维护与修复 】${NC}"
-        echo -e " ${GREEN}5${NC}. 重装依赖   ${GREEN}6${NC}. 环境体检"
-        echo -e " ${GREEN}7${NC}. 备份恢复   ${GREEN}8${NC}. 网络设置"
-        echo -e " ${GREEN}9${NC}. 卸载酒馆"
-        echo ""
-        echo -e "${CYAN}════════════════════════════════════════════════════════${NC}"
-        echo -e " ${GREEN}0${NC}. 退出"
-        echo -e "${CYAN}════════════════════════════════════════════════════════${NC}"
-        read -r -p " 请选择功能 [0-9]: " opt
+        echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
+        echo -e " ${DIM}作者${NC} ${BLUE}${AUTHOR_NAME}${NC}    ${DIM}群${NC} ${BLUE}${QQ_GROUP_1}${NC} / ${BLUE}${QQ_GROUP_2}${NC}"
+        echo -e " ${DIM}购卡${NC} ${UNDERLINE}${API_SHOP_URL#https://}${NC}"
+        echo -e " ${DIM}URL ${NC} ${UNDERLINE}${API_BASE_URL#https://}${NC}"
+        echo -e " ${DIM}查额${NC} ${UNDERLINE}${API_QUOTA_URL#https://}${NC}"
+        echo -e " ${DIM}酒馆${NC} $env_state    ${DIM}端口${NC} ${BLUE}${port}${NC}"
+        echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
+        echo -e "${BOLD}${BLUE}  核心功能${NC}"
+        echo -e "   ${GREEN}1${NC} 启动酒馆        ${GREEN}2${NC} ${BOLD}一键安装${NC}"
+        echo -e "   ${GREEN}3${NC} 更新酒馆        ${GREEN}4${NC} 切换版本"
+        echo -e ""
+        echo -e "${BOLD}${BLUE}  维护修复${NC}"
+        echo -e "   ${GREEN}5${NC} 重装依赖        ${GREEN}6${NC} 环境体检"
+        echo -e "   ${GREEN}7${NC} 备份恢复        ${GREEN}8${NC} 网络设置"
+        echo -e "   ${GREEN}9${NC} 卸载酒馆"
+        echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
+        echo -e "   ${RED}0${NC} 退出"
+        echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
+        read -r -p " ${BOLD}选择功能${NC} [0-9] > " opt
 
         case "$opt" in
             1) start_st; break ;;
