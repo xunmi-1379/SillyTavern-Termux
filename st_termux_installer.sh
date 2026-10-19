@@ -252,35 +252,222 @@ ensure_node_version() {
 }
 
 # ----------------------------- 代码拉取 -------------------------------------
-# GitHub 直连失败时的常见加速前缀（国内网络）
-GH_PROXIES=(
-    "https://ghfast.top/"
-    "https://gh-proxy.com/"
-    "https://ghproxy.net/"
+# ============================================================================
+# 下载源列表（按优先级排列，国内网络优先）
+# 每个源提供：git clone 地址、压缩包地址、是否走加速
+# 用户也可以用 --source N 手动指定
+# ============================================================================
+SOURCE_NAMES=(
+    "gh-proxy.com 压缩包（国内推荐）"
+    "gitclone.com 镜像（国内备用）"
+    "GitHub 官方 git（有代理时用）"
+    "ghproxy.net 压缩包（备用）"
+    "ghfast.top 压缩包（备用）"
+    "自定义地址（--source-url 指定）"
 )
 
-# 依次尝试: 用户指定镜像 -> 官方 -> 各加速前缀。返回 0 表示成功。
-clone_repo() {
-    local dest="$1" branch="${2:-release}"
-    local -a urls=()
-    [ -n "$BRANCH_MIRROR" ] && urls+=("$BRANCH_MIRROR")
-    urls+=("$REPO_URL")
-    local p
-    for p in "${GH_PROXIES[@]}"; do urls+=("${p}${REPO_URL}"); done
+# 返回第 N 个源的 git 地址
+source_url() {
+    local n="$1" branch="$2"
+    local base="https://github.com/SillyTavern/SillyTavern.git"
+    local tarball="https://github.com/SillyTavern/SillyTavern/archive/refs/heads/${branch:-release}.tar.gz"
+    case "$n" in
+        1) echo "https://gh-proxy.com/${base}" ;;
+        2) echo "https://gitclone.com/github.com/SillyTavern/SillyTavern.git" ;;
+        3) echo "$base" ;;
+        4) echo "https://ghproxy.net/${base}" ;;
+        5) echo "https://ghfast.top/${base}" ;;
+        6) echo "${CUSTOM_SOURCE_URL:-}" ;;
+        *) echo "" ;;
+    esac
+}
 
+# 返回第 N 个源的**压缩包**地址（用于 git 失败时的兜底）
+source_tarball() {
+    local n="$1" branch="${2:-release}"
+    local tarball="https://github.com/SillyTavern/SillyTavern/archive/refs/heads/${branch}.tar.gz"
+    case "$n" in
+        1) echo "https://gh-proxy.com/${tarball}" ;;
+        2) echo "https://gitclone.com/github.com/SillyTavern/SillyTavern/archive/${branch}.tar.gz" ;;
+        3) echo "$tarball" ;;
+        4) echo "https://ghproxy.net/${tarball}" ;;
+        5) echo "https://ghfast.top/${tarball}" ;;
+        6) echo "${CUSTOM_SOURCE_URL:-}" ;;
+        *) echo "" ;;
+    esac
+}
+
+# 快速探测一个地址是否可达（HEAD 请求，最多 12 秒）
+probe_url() {
+    local url="$1"
+    [ -z "$url" ] && return 1
+    local code
+    code="$(curl -sIL -m 12 -o /dev/null -w "%{http_code}" "$url" 2>/dev/null)"
+    case "$code" in 200|301|302) return 0 ;; *) return 1 ;; esac
+}
+
+# 使用 git 的部分克隆（直接下载 .git 包，再检出文件）。
+# 注意: 实测在加速代理上不可靠（拉 blob 时会 invalid index-pack），
+# 仅作为最后的兜底手段，默认不启用。
+git_partial_clone() {
+    local gurl="$1" dest="$2" branch="$3"
+    rm -rf "$dest"
+    mkdir -p "$dest" || return 1
+
+    (
+        set -e
+        cd "$dest" || exit 1
+        git init -q
+        git remote add origin "$gurl"
+        # 只取该分支的最新提交，不下载无关历史
+        git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=90 \
+            fetch --depth 1 --filter=blob:none origin "$branch"
+        git checkout -q -b "$branch" FETCH_HEAD
+    ) 2>&1 | tee -a "$LOG_FILE" | tail -n 12
+
+    [ -f "$dest/server.js" ] && [ -d "$dest/.git" ] && return 0
+    return 1
+}
+
+# 用压缩包方式安装（git 走不通时的兜底，不依赖 .git）
+install_from_tarball() {
+    local dest="$1" branch="${2:-release}" n="$3"
     local url
-    for url in "${urls[@]}"; do
-        info "正在克隆 ($branch): $url"
+    url="$(source_tarball "$n" "$branch")"
+    [ -z "$url" ] && return 1
+
+    # 体积约 160MB 压缩包，给足时间；看门狗监视“是否还在增长”，而不是总时长
+    local tmp="$dest.tar.gz" attempt=0 last_size=-1 stall=0 limit="${TARBALL_STALL_SECONDS:-180}"
+    info "下载 SillyTavern 源码包（约 160MB）。国内网络通常几分钟，"
+    info "如果很慢会自动续传，${YELLOW}请保持屏幕常亮${NC}。"
+    rm -f "$tmp"
+
+    while [ "$attempt" -lt 8 ]; do
+        attempt=$((attempt + 1))
+        # 后台下载，前台每 5 秒检查一次文件是否还在增长
+        curl -fL -C - --connect-timeout 20 --speed-limit 512 --speed-time 120 \
+             -o "$tmp" "$url" >> "$LOG_FILE" 2>&1 &
+        local cpid=$!
+        last_size=-1; stall=0
+        while kill -0 "$cpid" 2>/dev/null; do
+            sleep 5
+            local cur
+            cur="$(stat -c %s "$tmp" 2>/dev/null || echo 0)"
+            if [ "$cur" -le "${last_size:-0}" ]; then
+                stall=$((stall + 5))
+                if [ "$stall" -ge "$limit" ]; then
+                    warn "超过 ${limit} 秒没有进展，重新连接..."
+                    kill "$cpid" 2>/dev/null
+                    break
+                fi
+            else
+                stall=0
+                last_size="$cur"
+                printf "\r  已下载 %.1f MB ..." "$(awk "BEGIN{print $cur/1048576}")"
+            fi
+        done
+        printf "\r"
+
+        if [ "$(stat -c %s "$tmp" 2>/dev/null || echo 0)" -gt "${last_size:-0}" ] 2>/dev/null; then
+            break   # 可能是正常结束
+        fi
+        warn "下载中断（第 $attempt 次），正在续传..."
+        sleep 2
+    done
+
+    # 校验：必须是完整的 gzip
+    if [ ! -s "$tmp" ] || ! gzip -t "$tmp" 2>/dev/null; then
+        error "压缩包不完整或下载失败: $(du -h "$tmp" 2>/dev/null | cut -f1)"
+        rm -f "$tmp"
+        return 1
+    fi
+    ok "压缩包下载完成 ($(du -h "$tmp" | cut -f1))"
+
+    rm -rf "$dest" "$dest.unpack"
+    mkdir -p "$dest.unpack"
+    if ! tar -xzf "$tmp" -C "$dest.unpack" 2>/dev/null; then
+        rm -rf "$dest.unpack" "$tmp"
+        return 1
+    fi
+    local inner
+    inner="$(ls -d "$dest.unpack"/*/ 2>/dev/null | head -n 1)"
+    [ -n "$inner" ] || { rm -rf "$dest.unpack" "$tmp"; return 1; }
+    mv "$inner" "$dest" 2>/dev/null
+    rm -rf "$dest.unpack" "$tmp"
+    [ -f "$dest/server.js" ] && [ -f "$dest/package.json" ] || return 1
+    ok "源码校验通过 (server.js / package.json 齐全)。"
+    ok "压缩包下载完成（此方式不含 .git，菜单里的「更新 / 切换版本」功能会受限）。"
+    return 0
+}
+
+# 尝试用第 N 个源获取代码
+# 顺序: 先压缩包(直连 HTTP，国内加速器对下载友好) -> 再 git clone(失败再试)
+try_source() {
+    local n="$1" dest="$2" branch="$3" label="$4"
+    local gurl turl
+    gurl="$(source_url "$n" "$branch")"
+    turl="$(source_tarball "$n" "$branch")"
+
+    # 方式A: 压缩包（首选 — 不受 git 协议大包传输问题影响）
+    if [ -n "$turl" ]; then
+        if install_from_tarball "$dest" "$branch" "$n"; then
+            return 0
+        fi
+        warn "[$label] 压缩包方式失败，尝试 git clone..."
+    fi
+
+    # 方式B: git clone（官方源且网络通畅时最快）
+    if [ -n "$gurl" ]; then
+        info "[$label] 正在 git clone..."
         rm -rf "$dest"
-        if git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
-               clone -b "$branch" --depth 1 "$url" "$dest" 2>&1 | tee -a "$LOG_FILE" | tail -n 15; then
-            if [ -d "$dest/.git" ]; then
-                ok "克隆成功。"
+        if timeout "${CLONE_TIMEOUT:-240}" git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
+               clone -b "$branch" --depth 1 "$gurl" "$dest" 2>&1 | tee -a "$LOG_FILE" | tail -n 12; then
+            if [ -d "$dest/.git" ] && [ -f "$dest/server.js" ]; then
+                ok "[$label] git clone 成功。"
                 return 0
             fi
         fi
-        warn "该地址失败，尝试下一个... (Ctrl+C 可中止)"
+    fi
+
+    rm -rf "$dest"
+    return 1
+}
+
+# 依次尝试所有源；国内源优先
+clone_repo() {
+    local dest="$1" branch="${2:-release}"
+    local -a order=()
+
+    if [ -n "${FORCE_SOURCE:-}" ]; then
+        order=("$FORCE_SOURCE")
+    else
+        order=(1 2 3 4 5)
+    fi
+
+    local n
+    for n in "${order[@]}"; do
+        local label="${SOURCE_NAMES[$((n - 1))]:-源$n}"
+        local gurl
+        gurl="$(source_url "$n" "$branch")"
+        local turl
+        turl="$(source_tarball "$n" "$branch")"
+
+        if [ -z "$gurl" ] && [ -z "$turl" ]; then
+            continue
+        fi
+
+        # 先探测，避免在死链上干等
+        if [ -n "$turl" ] && ! probe_url "$turl"; then
+            warn "[$label] 该源当前不可达，跳过（换下一个源）"
+            continue
+        fi
+
+        if try_source "$n" "$dest" "$branch" "$label"; then
+            return 0
+        fi
+        warn "[$label] 这个源没成功，继续换下一个..."
     done
+
     rm -rf "$dest"
     return 1
 }
@@ -296,30 +483,61 @@ choose_branch() {
     mapfile -t tags < <(list_tags)
     local n=${#tags[@]} i
 
-    echo -e "\n请选择版本:"
-    echo -e "  ${GREEN}1${NC}. release 分支 ${YELLOW}(推荐，稳定版)${NC}"
-    echo -e "  ${GREEN}2${NC}. staging 分支 (体验最新功能，可能不稳定)"
+    echo ""
+    echo -e "${CYAN}────────────────────────────────────────────────────${NC}"
+    echo -e "${BOLD}  选择要安装的版本${NC}"
+    echo -e "${CYAN}────────────────────────────────────────────────────${NC}"
+    echo -e "  ${GREEN}1${NC}. release 分支  ${YELLOW}★ 推荐新手选这个${NC}"
+    echo -e "     说明: SillyTavern 官方的「稳定版」。功能是所有版本里最稳定的，"
+    echo -e "           经过开发者测试后才发布，出问题最少。"
+    echo -e "     适合: 想直接用、不想折腾、怕出 bug 的人。"
+    echo ""
+    echo -e "  ${GREEN}2${NC}. staging 分支"
+    echo -e "     说明: 官方的「测试版」。新功能会先出现在这里，但可能带 bug，"
+    echo -e "           有时会启动报错或插件不兼容。"
+    echo -e "     适合: 想尝鲜最新功能、并且能自己看报错排查的人。"
+    echo -e "     ${YELLOW}不建议新手选。${NC}"
     if [ "$n" -gt 0 ]; then
-        echo -e "  ${GREEN}3${NC}. 指定 Tag 版本 (回退到旧版)"
-        echo "最近的 Tag:"
-        for ((i = 0; i < n; i++)); do printf "     %2d) %s\n" $((i + 1)) "${tags[$i]}"; done
+        echo ""
+        echo -e "  ${GREEN}3${NC}. 指定 Tag 版本 (回退到某个固定版本)"
+        echo -e "     说明: 装一个确切的历史版本号，比如升到新版出问题后回退。"
+        echo -e "     最近的 Tag:"
+        for ((i = 0; i < n; i++)); do printf "        %2d) %s\n" $((i + 1)) "${tags[$i]}"; done
     fi
-    read -r -p "请输入 [1-2]: " c
-    case "${c:-1}" in
-        2) echo "staging" ;;
-        3)
-            if [ "$n" -eq 0 ]; then echo "release"; return; fi
-            read -r -p "输入序号或完整 Tag: " t
-            if [[ "$t" =~ ^[0-9]+$ ]] && [ "$t" -ge 1 ] && [ "$t" -le "$n" ]; then
-                echo "tag:${tags[$((t - 1))]}"
-            elif [ -n "$t" ]; then
-                echo "tag:$t"
-            else
-                echo "release"
-            fi
-            ;;
-        *) echo "release" ;;
-    esac
+    echo -e "${CYAN}────────────────────────────────────────────────────${NC}"
+    echo -e "  直接按回车 = 选 1 (release 稳定版)"
+
+    local max_opt=2
+    [ "$n" -gt 0 ] && max_opt=3
+
+    local c
+    while true; do
+        read -r -p "  请输入 [1-${max_opt}]: " c
+        c="${c:-1}"
+        case "$c" in
+            1) echo "release"; return ;;
+            2) echo "staging"; return ;;
+            3)
+                if [ "$n" -eq 0 ]; then
+                    warn "没有可用的 Tag，改用 release 稳定版。"
+                    echo "release"
+                    return
+                fi
+                read -r -p "  输入序号(1-${n})或完整 Tag 号: " t
+                if [[ "$t" =~ ^[0-9]+$ ]] && [ "$t" -ge 1 ] && [ "$t" -le "$n" ]; then
+                    echo "tag:${tags[$((t - 1))]}"
+                elif [ -n "$t" ]; then
+                    echo "tag:$t"
+                else
+                    echo "release"
+                fi
+                return
+                ;;
+            *)
+                warn "只能输入 1~${max_opt}，请重新输入。"
+                ;;
+        esac
+    done
 }
 
 checkout_branch() {
@@ -623,11 +841,16 @@ do_install() {
     [ "$target" = "staging" ] && branch="staging"
 
     if ! clone_repo "$ST_DIR" "$branch"; then
-        error "克隆失败。可能是 GitHub 被墙或网络不稳。"
-        echo -e "  解决办法(任选其一):"
-        echo -e "    ${GREEN}1)${NC} 手动换源后重试: 主菜单 [8] 切换软件源/镜像"
-        echo -e "    ${GREEN}2)${NC} 用代理: export https_proxy=http://127.0.0.1:7890 后再运行"
-        echo -e "    ${GREEN}3)${NC} 直接改 hosts/使用加速器 (如 ghproxy)"
+        error "所有下载源都没成功，代码没有获取到。"
+        echo -e ""
+        echo -e "${YELLOW}  按顺序排查(任选其一即可):${NC}"
+        echo -e "    ${GREEN}1)${NC} 检查网络: 先关掉 VPN/代理再试一次（有些代理反而连不上国内加速源）"
+        echo -e "    ${GREEN}2)${NC} 换个源重试: 重新运行脚本，加参数 ${CYAN}--source 2${NC}"
+        echo -e "        例如: ${CYAN}bash ~/st_termux_installer.sh --source 2 --install${NC}"
+        echo -e "    ${GREEN}3)${NC} 用代理: 先执行 ${CYAN}export https_proxy=http://127.0.0.1:7890${NC}（端口改成你的代理）"
+        echo -e "    ${GREEN}4)${NC} 查看可用源: ${CYAN}bash ~/st_termux_installer.sh --sources${NC}"
+        echo -e ""
+        echo -e "  ${BLUE}详细日志${NC}: $LOG_FILE"
         return 1
     fi
     ok "代码获取完成。"
@@ -648,9 +871,21 @@ do_install() {
 
     step "4/4 初始化配置与快捷命令"
     setup_config
-    install_alias
+    install_self
+    enable_autostart
     ok "安装完成！"
     log "install ok"
+
+    echo ""
+    echo -e "${GREEN}────────────────────────────────────────────────${NC}"
+    echo -e "${BOLD} 使用说明（建议看完）${NC}"
+    echo -e "${GREEN}────────────────────────────────────────────────${NC}"
+    echo -e "  1. 以后${YELLOW}打开 Termux 会直接进入本菜单${NC}，不用再敲长命令"
+    echo -e "  2. 启动酒馆: 菜单选 1 ，或直接敲 ${GREEN}st${NC}"
+    echo -e "  3. 打开酒馆网页: 手机浏览器访问 ${CYAN}http://127.0.0.1:$(get_port)${NC}"
+    echo -e "  4. 关闭酒馆: 在运行中的界面按 ${YELLOW}Ctrl+C${NC}（先按 CTRL 再按 C）"
+    echo -e "  5. 卸载 / 关闭自启: 菜单选 9 / 12"
+    echo -e "${GREEN}────────────────────────────────────────────────${NC}"
 
     if [ "$auto_start" = "restart" ]; then
         start_st
@@ -838,29 +1073,128 @@ doctor() {
     fi
 }
 
+# ----------------------------- 开头提醒 -------------------------------------
+show_welcome() {
+    local installed=0
+    [ -f "$ST_DIR/server.js" ] && installed=1
+
+    echo -e "${CYAN}====================================================${NC}"
+    echo -e "${BOLD}${PURPLE}  SillyTavern Termux 一键安装/管理工具${NC}  ${YELLOW}v${SCRIPT_VERSION}${NC}"
+    echo -e "${CYAN}====================================================${NC}"
+    if [ "$installed" -eq 0 ]; then
+        echo -e "  ${YELLOW}当前状态: 还没安装 SillyTavern${NC}"
+        echo -e "  ${GREEN}下一步: 在下面菜单输入 2 ，会自动开始安装${NC}"
+        echo -e ""
+        echo -e "  ${BLUE}小提示${NC}"
+        echo -e "  · 安装时下载依赖要 15~40 分钟，${YELLOW}别锁屏、别切后台${NC}"
+        echo -e "  · 所有提问直接按回车 = 用推荐项，也能装上"
+        echo -e "  · 装好后任何时候敲 ${GREEN}stm${NC} 都能回到这个菜单"
+    else
+        echo -e "  ${GREEN}当前状态: SillyTavern 已安装${NC}"
+        echo -e "  想启动就输入 ${GREEN}1${NC}，想更新输入 ${GREEN}3${NC}"
+    fi
+    echo -e "${CYAN}====================================================${NC}"
+}
+
 # ----------------------------- 快捷命令 / 自启 -------------------------------
-install_alias() {
+# .bashrc 里的标记块（自启 + 快捷命令）
+AUTOSTART_BEGIN="# >>> st-toolbox autostart >>>"
+AUTOSTART_END="# <<< st-toolbox autostart <<<"
+
+has_autostart() {
+    grep -q "^${AUTOSTART_BEGIN}" "$HOME/.bashrc" 2>/dev/null
+}
+
+# 安装/更新自启块：每次打开 Termux 自动进入脚本菜单
+enable_autostart() {
     local rc="$HOME/.bashrc"
-    local marker="# >>> st-toolbox alias >>>"
-    grep -q "$marker" "$rc" 2>/dev/null && return 0
+    touch "$rc" 2>/dev/null
+
+    # 先删掉旧的标记块，避免重复（重复会导致要退出两次）
+    disable_autostart_quiet
+
+    install_self
+
     {
         echo ""
-        echo "$marker"
+        echo "$AUTOSTART_BEGIN"
+        echo "# 打开 Termux 自动进入 SillyTavern 管理菜单"
+        echo 'if [ -f "$HOME/st_termux_installer.sh" ] && [ -z "$ST_MENU_NOLOOP" ]; then'
+        echo '    bash "$HOME/st_termux_installer.sh"'
+        echo "fi"
+        echo ""
+        echo "# 快捷命令"
         echo "alias st='cd \"\$HOME/SillyTavern\" && bash start.sh'"
         echo "alias stu='cd \"\$HOME/SillyTavern\" && git pull --rebase --autostash && npm install --omit=dev'"
         echo "alias stm='bash \"\$HOME/st_termux_installer.sh\"'"
-        echo "# <<< st-toolbox alias <<<"
+        echo "alias stoff='ST_MENU_NOLOOP=1 bash -c \"true\"'"
+        echo "$AUTOSTART_END"
     } >> "$rc"
-    ok "已添加快捷命令: st(启动) / stu(更新) / stm(打开本脚本)"
+
+    # Termux 登录时读的是 .bash_profile，要确保它加载 .bashrc
+    ensure_bash_profile
+
+    ok "已设置「打开 Termux 自动进入菜单」"
+    echo -e "  以后每次打开 Termux，会直接看到管理菜单。"
+    echo -e "  ${YELLOW}想临时回到普通命令行${NC}: 在菜单里选 0 退出即可；"
+    echo -e "  ${YELLOW}想彻底关闭自启${NC}: 菜单里选 12 。"
+}
+
+ensure_bash_profile() {
+    local p="$HOME/.bash_profile"
+    touch "$p" 2>/dev/null
+    if ! grep -q '\.bashrc' "$p" 2>/dev/null; then
+        {
+            echo ''
+            echo '# 加载 .bashrc（Termux 登录时默认不读 .bashrc）'
+            echo 'if [ -f "$HOME/.bashrc" ]; then'
+            echo '    . "$HOME/.bashrc"'
+            echo 'fi'
+        } >> "$p"
+        ok "已配置 ~/.bash_profile 加载 .bashrc"
+    fi
+}
+
+disable_autostart_quiet() {
+    local rc="$HOME/.bashrc"
+    [ -f "$rc" ] || return 0
+    # 删除标记块 + 顺手清掉旧版本可能残留的自启行
+    sed -i "/^${AUTOSTART_BEGIN}$/,/^${AUTOSTART_END}$/d" "$rc" 2>/dev/null
+    sed -i '/# BEGIN ANGLER_TOOLBOX_AUTOSTART/,/# END ANGLER_TOOLBOX_AUTOSTART/d' "$rc" 2>/dev/null
+}
+
+disable_autostart() {
+    if has_autostart; then
+        disable_autostart_quiet
+        ok "已关闭「打开 Termux 自动进入菜单」"
+    else
+        info "当前没有开启自启。"
+    fi
+}
+
+toggle_autostart() {
+    if has_autostart; then
+        disable_autostart
+    else
+        enable_autostart
+    fi
+}
+
+install_alias() {
+    # 兼容旧调用：直接走 enable_autostart（里面包含快捷命令）
+    if ! has_autostart; then
+        enable_autostart > /dev/null 2>&1 && \
+            info "已添加：打开 Termux 自动进菜单，以及快捷命令 st / stu / stm"
+    fi
 }
 
 install_self() {
-    # 支持 bash <(curl ...) 运行；把自己复制到 HOME 便于下次直接 stm
+    # 支持 bash <(curl ...) 运行；把自己复制到 HOME 便于下次直接用
     local src="${BASH_SOURCE[0]}"
     [ "$src" = "$SELF_PATH" ] && return 0
     if [ -f "$src" ] && [ -r "$src" ] && case "$src" in /proc/*|/dev/fd/*) false;; *) true;; esac; then
         cp "$src" "$SELF_PATH" 2>/dev/null && chmod +x "$SELF_PATH" 2>/dev/null && \
-            info "脚本已保存到 $SELF_PATH (以后可直接运行 bash ~/st_termux_installer.sh)"
+            info "脚本已保存到 $SELF_PATH"
     fi
 }
 
@@ -893,11 +1227,10 @@ main_menu() {
         if [ -f "$ST_DIR/server.js" ]; then env_state="${GREEN}已安装${NC}"; else env_state="${YELLOW}未安装${NC}"; fi
         port="$(get_port)"
 
-        echo -e "${CYAN}====================================================${NC}"
-        echo -e "${BOLD}${PURPLE}  SillyTavern Termux 一键安装/管理工具${NC}  ${YELLOW}v${SCRIPT_VERSION}${NC}"
-        echo -e "${CYAN}====================================================${NC}"
+        echo -e "${CYAN}----------------------------------------------------${NC}"
         echo -e " SillyTavern : $env_state    Node: $node_state"
         echo -e " 目录        : ${CYAN}$ST_DIR${NC}  端口: ${CYAN}$port${NC}"
+        echo -e " 开机自启    : $(autostart_state)"
         echo -e "${CYAN}----------------------------------------------------${NC}"
         echo -e " ${GREEN}1${NC}. 启动 SillyTavern"
         echo -e " ${GREEN}2${NC}. ${BOLD}一键安装${NC} (装依赖+装ST+初始化+启动)"
@@ -908,9 +1241,10 @@ main_menu() {
         echo -e " ${GREEN}7${NC}. 备份 / 恢复数据"
         echo -e " ${GREEN}8${NC}. 修改端口 / 网络设置"
         echo -e " ${GREEN}9${NC}. 卸载 SillyTavern"
+        echo -e " ${GREEN}12${NC}. 开机自启 (打开 Termux 自动进菜单)"
         echo -e " ${GREEN}0${NC}. 退出"
         echo -e "${CYAN}====================================================${NC}"
-        read -r -p " 请输入选项 [0-9]: " opt
+        read -r -p " 请输入选项 [0-9/12]: " opt
 
         case "$opt" in
             1) start_st; break ;;
@@ -952,10 +1286,19 @@ main_menu() {
                 pause
                 ;;
             9) do_uninstall; pause ;;
+            12) toggle_autostart; pause ;;
             0) exit 0 ;;
             *) error "无效选项"; sleep 1 ;;
         esac
     done
+}
+
+autostart_state() {
+    if has_autostart; then
+        echo -e "${GREEN}已开启${NC}"
+    else
+        echo -e "${RED}未开启${NC}"
+    fi
 }
 
 # ----------------------------- 入口 -----------------------------------------
@@ -963,20 +1306,46 @@ main() {
     detect_platform
     mkdir -p "$LOG_DIR" 2>/dev/null
 
+    # 先解析可选参数（下载源）
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --source)      FORCE_SOURCE="${2:-}"; shift 2 ;;
+            --source-url)  CUSTOM_SOURCE_URL="${2:-}"; FORCE_SOURCE=6; shift 2 ;;
+            *)             break ;;
+        esac
+    done
+
     case "${1:-}" in
-        --install|-i) do_install "${2:-ask}" ;;
+        --install|-i) install_self; do_install "${2:-ask}" ;;
         --update|-u)  do_update ;;
         --start|-s)   shift; start_st "$@" ;;
         --doctor|-d)  doctor ;;
         --backup)     backup_data ;;
         --uninstall)  do_uninstall ;;
+        --autostart)  enable_autostart ;;
+        --no-autostart) disable_autostart ;;
+        --sources)
+            echo "可用的下载源:"
+            local i
+            for i in "${!SOURCE_NAMES[@]}"; do
+                printf "  %d. %s\n" $((i + 1)) "${SOURCE_NAMES[$i]}"
+            done
+            echo ""
+            echo "用法举例: bash st_termux_installer.sh --source 2 --install"
+            ;;
         --pkg-mirror) PKG_MIRROR="$2"; shift; install_termux_deps; ;;
         --npm-mirror) NPM_MIRROR="$2"; shift ;;
         --git-mirror) BRANCH_MIRROR="$2"; shift ;;
         --help|-h)
             awk 'NR>2 && /^# =====/ {exit} NR>2' "$0" | sed 's/^# \{0,1\}//'
             ;;
-        "") install_self; main_menu ;;
+        "")
+            install_self
+            if [ -z "$ST_MENU_NOLOOP" ]; then
+                show_welcome
+            fi
+            main_menu
+            ;;
         *) error "未知参数: $1"; echo "使用 --help 查看用法。"; exit 1 ;;
     esac
 }
