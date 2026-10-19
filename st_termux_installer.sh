@@ -1343,20 +1343,18 @@ API_SHOP_URL="https://shop.shuixian.fan/"
 API_BASE_URL="https://api.shuixian.love/v1"
 API_QUOTA_URL="https://ed.shuixian.love/"
 
-# 大标题（VIOLET 风格 ASCII，整体居中）
-BANNER_WIDTH=54
+# 大标题（VIOLET 风格 ASCII）
+# 说明: 每行按“V 顶部基线”手工对齐好了，这里只整体加左边距，
+#       保证手机上既不偏左也不会换行。
+BANNER_PAD=10
 print_banner() {
     echo -e "${CYAN}"
-    # 逐行按终端宽度居中，避免手机上标题偏左
-    awk -v W="$BANNER_WIDTH" '
-        { n = int((W - length($0)) / 2); if (n < 0) n = 0; printf "%*s%s\n", n, "", $0 }
-    ' <<'BANNER'
- __     __ ___  _     ___  _____
- \ \   / /|_ _|| |   / _ \|  ___|
-  \ \ / /  | | | |  | | | || |___
-   \ V /   | | | |__| |_| ||  ___|
-    \_/   |___||____|\___/ |_|
-BANNER
+    printf '%*s%s\n' "$BANNER_PAD" "" '__      __  ___   ____   _      _____  _____'
+    printf '%*s%s\n' "$BANNER_PAD" "" '\ \    / / |_ _| / __ \ | |    |  ___||_   _|'
+    printf '%*s%s\n' "$BANNER_PAD" "" ' \ \  / /   | | | |  | || |    | |__    | |'
+    printf '%*s%s\n' "$BANNER_PAD" "" '  \ \/ /    | | | |  | || |    |  __|   | |'
+    printf '%*s%s\n' "$BANNER_PAD" "" '   \  /     | | | |__| || |___ | |___   | |'
+    printf '%*s%s\n' "$BANNER_PAD" "" '    \/     |___| \____/ |_____||_____|  |_|'
     echo -e "${NC}"
 }
 
@@ -1377,13 +1375,13 @@ main_menu() {
             FIRST_SCREEN=0
             show_welcome
         fi
-        echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
+        echo -e "${CYAN}════════════════════════════════════${NC}"
         echo -e " ${DIM}作者${NC} ${BLUE}${AUTHOR_NAME}${NC}    ${DIM}群${NC} ${BLUE}${QQ_GROUP_1}${NC} / ${BLUE}${QQ_GROUP_2}${NC}"
         echo -e " ${DIM}购卡${NC} ${UNDERLINE}${API_SHOP_URL#https://}${NC}"
         echo -e " ${DIM}URL ${NC} ${UNDERLINE}${API_BASE_URL#https://}${NC}"
         echo -e " ${DIM}查额${NC} ${UNDERLINE}${API_QUOTA_URL#https://}${NC}"
         echo -e " ${DIM}酒馆${NC} $env_state    ${DIM}端口${NC} ${BLUE}${port}${NC}"
-        echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
+        echo -e "${CYAN}════════════════════════════════════${NC}"
         echo -e "${BOLD}${BLUE}  核心功能${NC}"
         echo -e "   ${GREEN}1${NC} 启动酒馆        ${GREEN}2${NC} ${BOLD}一键安装${NC}"
         echo -e "   ${GREEN}3${NC} 更新酒馆        ${GREEN}4${NC} 切换版本"
@@ -1392,10 +1390,12 @@ main_menu() {
         echo -e "   ${GREEN}5${NC} 重装依赖        ${GREEN}6${NC} 环境体检"
         echo -e "   ${GREEN}7${NC} 备份恢复        ${GREEN}8${NC} 网络设置"
         echo -e "   ${GREEN}9${NC} 卸载酒馆"
-        echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
+        echo -e "${CYAN}════════════════════════════════════${NC}"
         echo -e "   ${RED}0${NC} 退出"
-        echo -e "${CYAN}════════════════════════════════════════════════════${NC}"
-        read -r -p " ${BOLD}选择功能${NC} [0-9] > " opt
+        echo -e "${CYAN}════════════════════════════════════${NC}"
+        # 注意: read -p 不会解析颜色转义码，必须先用 printf 输出提示
+        printf " 选择功能 [0-9] > "
+        read -r opt
 
         case "$opt" in
             1) start_st; break ;;
